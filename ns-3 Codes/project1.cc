@@ -1,6 +1,4 @@
-
 #include "ns3/core-module.h"
-#include "ns3/point-to-point-module.h"
 #include "ns3/network-module.h"
 #include "ns3/applications-module.h"
 #include "ns3/wifi-module.h"
@@ -41,10 +39,12 @@ int
 main(int argc, char *argv[])
 {
   uint32_t nSta = 5;
-  uint32_t cwmin = 31;
-  uint32_t cwmax = 1023;
+  uint32_t cwmin = 127;
+  uint32_t cwmax = 255;
   bool trace = false;
 
+  //add command line parameters for enabling or disabling logging components
+  //also for changing number of devices
   CommandLine cmd;
   cmd.AddValue ("nSta", "Number of wifi STA devices", nSta);
   cmd.AddValue ("cwmin", "Minimum contention window size", cwmin);
@@ -54,35 +54,39 @@ main(int argc, char *argv[])
 
   Config::SetDefault ("ns3::WifiRemoteStationManager::FragmentationThreshold", StringValue ("2200"));
   Config::SetDefault ("ns3::WifiRemoteStationManager::RtsCtsThreshold", StringValue ("2200"));
-  Config::SetDefault ("ns3::DcaTxop::CwMin", UintegerValue (cwmin));
-  Config::SetDefault ("ns3::DcaTxop::CwMax", UintegerValue (cwmax));
+  Config::SetDefault ("ns3::DcaTxop::MinCw", UintegerValue (cwmin));
+  Config::SetDefault ("ns3::DcaTxop::MaxCw", UintegerValue (cwmax));
   
-// stations and access point
+  //create 'nSta' wireless stations and one AP
   NodeContainer wifiStaNodes;
   wifiStaNodes.Create (nSta);
   NodeContainer wifiApNode;
   wifiApNode.Create (uint32_t (1));
 
-// physical payer
+  //construct wifi configuration and channel models
+  //create a channel object and associate it to PHY layer object manager
   YansWifiChannelHelper channel = YansWifiChannelHelper::Default ();
   channel.SetPropagationDelay ("ns3::ConstantSpeedPropagationDelayModel","Speed",StringValue("500000"));
   YansWifiPhyHelper phy = YansWifiPhyHelper::Default ();
+  //make sure all PHY layer objects created by Yan, complete Phy helper configuration
   phy.SetChannel (channel.Create ());
-
-// station and access point mac layer
+ 
+  //now, start focusing on Mac Layer, work with non-Qos MACs
   WifiHelper wifi;
   // wifi.EnableLogComponents();
   wifi.SetStandard (WIFI_PHY_STANDARD_80211b);
   StringValue phymode = StringValue ("DsssRate1Mbps");
   wifi.SetRemoteStationManager ("ns3::ConstantRateWifiManager","DataMode", phymode,"ControlMode",phymode);
-
+  
+  //Next, configure type of MAC, SSID of infrastructure network
   NqosWifiMacHelper macSta, macAp;
   Ssid ssid = Ssid ("project-1");
-
   macSta.SetType ("ns3::StaWifiMac","Ssid", SsidValue (ssid));
+  //After configuring MAC and PHY, now invoke Install to create wifi devices
   NetDeviceContainer staDevices;
   staDevices = wifi.Install (phy, macSta, wifiStaNodes);
 
+  //configure AP node, changing default Attributes of NqosWifiMacHelper
   macAp.SetType ("ns3::ApWifiMac","Ssid", SsidValue (ssid));
   NetDeviceContainer apDevices;
   apDevices = wifi.Install (phy, macAp, wifiApNode);
@@ -90,37 +94,40 @@ main(int argc, char *argv[])
   Config::SetDefault ("ns3::WifiRemoteStationManager::MaxSsrc", StringValue("10000"));
   Config::SetDefault ("ns3::WifiRemoteStationManager::MaxSlrc", StringValue("10000"));
 
-// Set constant position of stations/ap
+  // Set constant position of stations & ap
   MobilityHelper mobility;
 
   Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator> ();
   mobility.SetMobilityModel ("ns3::ConstantPositionMobilityModel");
 
-  // ap as center at (0,0)
-	float rho = 0.5; // radius
+  // locate AP at the center with position (0, 0, 0)
 	positionAlloc->Add (Vector (0,0,0));
-  for (uint32_t i=0;i<nSta;i++)
+  // locate N stations as a circle with a center at AP
+  // for N stations, set rho as radius and theta
+  // then calculate position of each station  
+  float rho = 0.5;
+  for (uint32_t i = 0; i < nSta; i++)
   {
-    double theta = i* 2 * PI / nSta;
+    double theta = i * 2 * PI / nSta;
     positionAlloc->Add (Vector (rho * cos(theta), rho * sin(theta), 0.0));
   }
-  
   mobility.SetPositionAllocator (positionAlloc);
+  //tell MobilityHelper to install the mobility models on STA nodes
   mobility.Install (wifiApNode);
   mobility.Install (wifiStaNodes);
 
+  //intall network protocol stacks
   InternetStackHelper stack;
   stack.Install (wifiApNode);
   stack.Install (wifiStaNodes);
 
-// assign Ipv4 address
+  // assign Ipv4 address, use network "10.1.1.0"
   Ipv4AddressHelper address;
-
   address.SetBase ("10.1.1.0", "255.255.255.0");
   Ipv4InterfaceContainer ApInterface = address.Assign (apDevices);
   Ipv4InterfaceContainer StaInterface =	address.Assign (staDevices);
 
-// station application
+  // station application
   for (uint32_t i=0;i<nSta;i++)
   {
 	  OnOffHelper onoff ("ns3::UdpSocketFactory", Address (InetSocketAddress (ApInterface.GetAddress(0), 9)));
@@ -130,7 +137,7 @@ main(int argc, char *argv[])
 	  Staapp.Stop (Seconds (txStopTime));
 	}
 
-// server application
+  // server application
   PacketSinkHelper sink ("ns3::UdpSocketFactory", 
   											 Address (InetSocketAddress (ApInterface.GetAddress(0), 9)));
   ApplicationContainer Serverapp = sink.Install (wifiApNode.Get (0));
@@ -138,12 +145,14 @@ main(int argc, char *argv[])
 
   Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
 
-// run simulator and give throughput
+  // run simulator and give throughput
   Ptr<PacketSink> sinkApp = DynamicCast<PacketSink> (Serverapp.Get (0));
   FlowMonitorHelper flowmon;
 	Ptr<FlowMonitor> monitor = flowmon.InstallAll ();
 
-  if (trace == true) Simulator::Schedule(Seconds(0.1), &get_throughput, sinkApp);
+  if (trace == true){
+    Simulator::Schedule(Seconds(0.1), &get_throughput, sinkApp);
+  }
   Simulator::Stop (Seconds (SimTime));
   Simulator::Run ();
 
